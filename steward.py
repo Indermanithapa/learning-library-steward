@@ -11,7 +11,7 @@ import os
 import json
 import requests
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ── Environment variables (set in GitHub Secrets) ──
 EXA_API_KEY = os.environ["EXA_API_KEY"]
@@ -46,8 +46,7 @@ DOMAIN_QUERIES = {
 
 def get_week_number():
     """Return the ISO week number of the current year."""
-    return datetime.utcnow().isocalendar()[1]
-
+    return datetime.now(timezone.utc).isocalendar()[1]
 
 def get_target_domain(week_num):
     """Map week number to a domain using the rotation formula."""
@@ -69,7 +68,7 @@ def search_exa(query, num_results=8):
             "type": "auto",
             "category": "research paper",
             "startPublishedDate": (
-                datetime.utcnow().replace(year=datetime.utcnow().year - 1).isoformat() + "Z"
+                datetime.now(timezone.utc).replace(year=datetime.now(timezone.utc).year - 1).isoformat()
             ),
         },
         timeout=60,
