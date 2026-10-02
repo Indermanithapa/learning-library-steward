@@ -28,27 +28,27 @@ This agent handles the discovery work. It never decides what enters the library.
 
 ## Architecture
 ┌─────────────────────────────────────────────────────────────┐
-│ GitHub Actions (weekly cron: Monday 09:00 UTC)              │
-│                                                             │
-│ steward.py                                                  │
-│ │                                                           │
-│ ├──▶ Exa API → discover recent research papers             │
-│ ├──▶ Gemini API → evaluate, score, summarize               │
-│ └──▶ Supabase → insert into review_queue                   │
-│                                                             │
+│ GitHub Actions (weekly cron: Monday 09:00 UTC) │
+│ │
+│ steward.py │
+│ │ │
+│ ├──▶ Exa API → discover recent research papers │
+│ ├──▶ Gemini API → evaluate, score, summarize │
+│ └──▶ Supabase → insert into review_queue │
+│ │
 └─────────────────────────────────────────────────────────────┘
 │
 ▼
 ┌──────────────────┐
-│ /review UI       │
-│ (Human review)   │
+│ /review UI │
+│ (Human review) │
 └──────────────────┘
 │
 Approve / Reject / Defer
 │
 ▼
 ┌──────────────────┐
-│ Library (live)   │
+│ Library (live) │
 └──────────────────┘
 
 ---
