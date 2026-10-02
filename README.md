@@ -25,31 +25,28 @@ The learning field produces thousands of papers, frameworks, tools, and platform
 This agent handles the discovery work. It never decides what enters the library. That's a human job, and the design is intentional: **AI triages. Humans decide.**
 
 ---
-
 ## Architecture
-┌─────────────────────────────────────────────────────────────┐
-│ GitHub Actions (weekly cron: Monday 09:00 UTC) │
-│ │
-│ steward.py │
-│ │ │
-│ ├──▶ Exa API → discover recent research papers │
-│ ├──▶ Gemini API → evaluate, score, summarize │
-│ └──▶ Supabase → insert into review_queue │
-│ │
-└─────────────────────────────────────────────────────────────┘
-│
-▼
-┌──────────────────┐
-│ /review UI │
-│ (Human review) │
-└──────────────────┘
-│
-Approve / Reject / Defer
-│
-▼
-┌──────────────────┐
-│ Library (live) │
-└──────────────────┘
+
+```mermaid
+flowchart TD
+    A[GitHub Actions<br/>Weekly cron: Monday 09:00 UTC] --> B[steward.py]
+    B --> C[Exa API<br/>Discover recent research papers]
+    C --> D[Gemini API<br/>Evaluate, score, summarize]
+    D --> E[Supabase<br/>Insert into review_queue]
+    E --> F[Review UI<br/>Human review]
+    F --> G{Decision}
+    G -->|Approve| H[Library]
+    G -->|Reject| I[Logged with reason]
+    G -->|Defer| J[Revisited next week]
+```
+
+**Flow:**
+1. GitHub Actions triggers the sweep on schedule
+2. `steward.py` calls Exa to discover candidates
+3. Gemini evaluates and scores each candidate
+4. Verified candidates are inserted into Supabase's review queue
+5. A human reviews each one on the `/review` page
+6. Approved resources enter the library; rejected ones are logged
 
 ---
 
