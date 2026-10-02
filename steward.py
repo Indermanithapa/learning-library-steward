@@ -77,8 +77,10 @@ def search_exa(query, num_results=8):
     return response.json().get("results", [])
 
 
-def evaluate_with_gemini(candidate, domain):
-    """Score a candidate using Gemini and return structured evaluation."""
+import time
+
+def evaluate_with_gemini(candidate, domain, max_retries=3):
+    """Score a candidate using Gemini with retry logic."""
     prompt = f"""You are the Learning Library Steward. Evaluate this candidate resource for a rigorously curated library.
 
 TARGET DOMAIN: {domain}
@@ -116,26 +118,46 @@ Return ONLY a JSON object with these fields:
 
 No commentary. Only the JSON object."""
 
-    response = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={GEMINI_API_KEY}",
-        headers={"Content-Type": "application/json"},
-        json={
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 0.4,
-                "maxOutputTokens": 2048,
-                "responseMimeType": "application/json",
-            },
-        },
-        timeout=90,
-    )
-    response.raise_for_status()
-    data = response.json()
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={GEMINI_API_KEY}",
+                headers={"Content-Type": "application/json"},
+                json={
+                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "temperature": 0.4,
+                        "maxOutputTokens": 2048,
+                        "responseMimeType": "application/json",
+                    },
+                },
+                timeout=90,
+            )
 
-    text = data["candidates"][0]["content"]["parts"][0]["text"]
-    # Strip markdown code fences if present
-    text = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    return json.loads(text)
+            if response.status_code == 503:
+                wait_time = (attempt + 1) * 15  # 15s, 30s, 45s
+                print(f"  [Retry] 503 from Gemini. Waiting {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+
+            response.raise_for_status()
+            data = response.json()
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+            text = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            return json.loads(text)
+
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 503 and attempt < max_retries - 1:
+                continue
+            raise
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"  [Retry] Attempt {attempt+1} failed: {e}")
+                time.sleep(10)
+                continue
+            raise
+
+    raise Exception(f"Gemini failed after {max_retries} attempts")
 
 
 def insert_to_supabase(candidate):
