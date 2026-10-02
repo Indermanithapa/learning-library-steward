@@ -229,6 +229,8 @@ def main():
 
     print(f"\n[Done] Inserted {inserted} candidates into review_queue")
 
+ # Space out Gemini calls to avoid rate limits
+        time.sleep(15)
 
 if __name__ == "__main__":
     main()
