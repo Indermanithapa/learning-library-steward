@@ -10,6 +10,7 @@ Runs on GitHub Actions on a weekly cron schedule.
 import os
 import json
 import requests
+import time
 from datetime import datetime
 
 # ── Environment variables (set in GitHub Secrets) ──
@@ -217,6 +218,7 @@ def main():
 
             if not evaluated.get("url_verified", False):
                 print(f"[Skip] URL not verified: {evaluated.get('title', '')[:60]}")
+                time.sleep(15)
                 continue
 
             insert_to_supabase(evaluated)
@@ -225,12 +227,12 @@ def main():
 
         except Exception as e:
             print(f"[Error] Candidate {i}: {e}")
-            continue
+
+        # Space out Gemini calls to avoid rate limit
+        time.sleep(15)
 
     print(f"\n[Done] Inserted {inserted} candidates into review_queue")
 
- # Space out Gemini calls to avoid rate limits
-        time.sleep(15)
 
 if __name__ == "__main__":
     main()
