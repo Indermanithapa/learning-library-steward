@@ -122,7 +122,7 @@ No commentary. Only the JSON object."""
     for attempt in range(max_retries):
         try:
             response = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={GEMINI_API_KEY}",
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={GEMINI_API_KEY}",
                 headers={"Content-Type": "application/json"},
                 json={
                     "contents": [{"role": "user", "parts": [{"text": prompt}]}],
