@@ -102,7 +102,7 @@ flowchart TB
 
 ## The Weekly Pipeline
 
-Every Monday at 09:00 UTC, the entire pipeline runs automatically:
+Every Sunday at 22:00 Pacific (Monday 05:00 UTC):
 
 ```mermaid
 sequenceDiagram
