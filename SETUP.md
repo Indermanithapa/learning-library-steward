@@ -39,7 +39,7 @@ At a high level:
 | `send_to_telegram.py` | Sends staged candidates to Telegram with action buttons |
 | `supabase_migration.sql` | Database schema and seed data |
 | `supabase/functions/telegram-steward/index.ts` | Edge function that receives button taps and writes decisions back to Supabase |
-| `.github/workflows/weekly-sweep.yml` | Schedules the whole thing every Monday at 09:00 UTC |
+| `.github/workflows/weekly-sweep.yml` | Schedules the whole thing every Sunday at 22:00 Pacific (Monday 05:00 UTC) |
 
 ---
 
