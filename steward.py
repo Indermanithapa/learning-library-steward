@@ -179,6 +179,13 @@ def insert_to_supabase(candidate):
         "ai_reasoning": candidate.get("ai_reasoning"),
         "suggested_action": "add",
         "confidence_level": "medium",
+        # TODO (v2): Implement real comparison logic against existing resources.
+        # Compare each candidate against the `resources` table and set comparison_type to
+        # one of: 'new', 'duplicate', 'supersedes', 'supplements', 'contradicts', 'gap'.
+        # Requires a two-step Gemini call: (1) fetch top-matching existing resources,
+        # (2) ask Gemini to compare and classify. Revisit when the library exceeds 200 resources.
+        # For now, default to 'new' — accurate for the majority of fresh discoveries.
+        "comparison_type": "new",
         "discovery_source": "exa_api",
         "status": "pending",
     }
