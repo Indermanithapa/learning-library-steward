@@ -46,6 +46,61 @@ DOMAIN_QUERIES = {
 }
 
 
+# Multiple angles per domain help the steward replace duplicates rather than stop early.
+# Keep the weekly domain rotation frozen; only broaden discovery within that domain.
+DOMAIN_QUERY_VARIANTS = {
+    "Learning Sciences": [
+        "recent peer-reviewed empirical studies on memory, retrieval practice, spacing, and long-term retention",
+        "recent peer-reviewed research on motivation, attention, cognitive load, and self-regulated learning",
+        "recent systematic reviews or meta-analyses in cognitive science and educational psychology",
+    ],
+    "Teaching & Pedagogy": [
+        "recent peer-reviewed empirical research on formative assessment, feedback, and student learning outcomes",
+        "recent peer-reviewed studies of classroom teaching strategies, active learning, and instructional practice",
+        "recent systematic reviews or meta-analyses on teaching methods and pedagogical effectiveness",
+    ],
+    "Learning Design": [
+        "recent peer-reviewed research on instructional design models and evidence-based curriculum design",
+        "recent empirical studies on multimedia learning, microlearning, and digital learning design",
+        "recent systematic reviews on instructional design, learning experience design, or online learning design",
+    ],
+    "Assessment & Evaluation": [
+        "recent peer-reviewed research on assessment validity, rubric design, and formative or authentic assessment",
+        "recent empirical research on learning evaluation, training transfer, and workplace learning outcomes",
+        "recent systematic reviews on learning analytics, educational measurement, or program evaluation",
+    ],
+    "Organizational Learning & Talent": [
+        "recent peer-reviewed empirical studies on workplace learning, skill development, and training transfer",
+        "recent peer-reviewed research on leadership development, talent development, and organizational capability",
+        "recent systematic reviews on employee learning, professional development, or learning culture",
+    ],
+    "Coaching & Mentoring": [
+        "recent peer-reviewed empirical research on coaching effectiveness and measurable developmental outcomes",
+        "recent peer-reviewed studies on mentoring, feedback conversations, and professional development",
+        "recent systematic reviews or meta-analyses on coaching, mentoring, or facilitation interventions",
+    ],
+    "Inclusive & Special Education": [
+        "recent peer-reviewed research on Universal Design for Learning and accessible instructional design",
+        "recent empirical studies on inclusive education, neurodiversity, and learner accommodations",
+        "recent systematic reviews on disability inclusion, special education, or accessibility in learning",
+    ],
+    "Research Methods & Evidence Synthesis": [
+        "recent peer-reviewed methodological papers on systematic reviews and evidence synthesis in education",
+        "recent research on meta-analysis methods, publication bias, and evidence quality in learning research",
+        "recent peer-reviewed methods research on education study design, reproducibility, or research reporting",
+    ],
+}
+
+WEEKLY_TARGET = 10
+MAX_UNIQUE_EVALUATIONS = 40
+RESULTS_PER_QUERY = 15
+MIN_QUALITY_AVERAGE = 7.0
+QUALITY_SCORE_FIELDS = (
+    "authority_score", "evidence_score", "relevance_score",
+    "currency_score", "uniqueness_score",
+)
+
+
 def get_week_number():
     """Return the ISO week number of the current year."""
     return datetime.now(timezone.utc).isocalendar()[1]
@@ -220,11 +275,57 @@ def supabase_get_all(table, params, page_size=500):
         if total is not None:
             if offset >= total:
                 break
-        elif len(page) < page_size:
-            # Fallback if the server does not provide a numeric total.
-            break
+        else:
+            # Without a numeric total, do not infer that a short page is final:
+            # a server-side cap may return fewer than page_size rows. Request the
+            # next offset and stop only when the server returns an empty page.
+            continue
 
     return rows
+
+
+
+def load_existing_canonical_urls():
+    """Load existing approved-resource and review-history URLs once per run."""
+    known = set()
+    resources = supabase_get_all(
+        "resources",
+        {"select": "id,url,source_status", "source_status": "eq.approved", "order": "id.asc"},
+    )
+    for row in resources:
+        canonical = canonicalize_url(row.get("url"))
+        if canonical:
+            known.add(canonical)
+
+    queue_rows = supabase_get_all(
+        "review_queue",
+        {"select": "id,url,status", "order": "id.asc"},
+    )
+    for row in queue_rows:
+        canonical = canonicalize_url(row.get("url"))
+        if canonical:
+            known.add(canonical)
+    return known
+
+
+def passes_quality_threshold(candidate):
+    """Require a verified direct URL and a complete mean score of at least 7/10."""
+    if not candidate.get("url_verified", False):
+        return False, "URL not verified as a direct resource link"
+
+    scores = []
+    for field in QUALITY_SCORE_FIELDS:
+        value = candidate.get(field)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False, f"missing or invalid score: {field}"
+        if value < 0 or value > 10:
+            return False, f"out-of-range score: {field}"
+        scores.append(float(value))
+
+    average = sum(scores) / len(scores)
+    if average < MIN_QUALITY_AVERAGE:
+        return False, f"quality average {average:.1f}/10 is below {MIN_QUALITY_AVERAGE:.1f}"
+    return True, f"quality average {average:.1f}/10"
 
 
 def candidate_already_exists(url):
@@ -309,37 +410,116 @@ def insert_to_supabase(candidate):
 def main():
     week_num = get_week_number()
     domain = get_target_domain(week_num)
-    query = DOMAIN_QUERIES[domain]
+    queries = [DOMAIN_QUERIES[domain], *DOMAIN_QUERY_VARIANTS[domain]]
 
     print(f"[Week {week_num}] Target domain: {domain}")
-    print(f"[Search] Query: {query}")
+    print(f"[Plan] Weekly target: {WEEKLY_TARGET} qualified new candidates")
+    print(f"[Plan] Up to {len(queries)} focused queries; {RESULTS_PER_QUERY} results per query; "
+          f"maximum {MAX_UNIQUE_EVALUATIONS} unique evaluations")
 
-    candidates = search_exa(query)
-    print(f"[Exa] Found {len(candidates)} candidates")
+    # Fail closed: if the existing records cannot be read, do not evaluate or insert.
+    try:
+        known_urls = load_existing_canonical_urls()
+    except Exception as e:
+        print(f"[Fatal] Could not load existing resource/review URLs; refusing discovery inserts: {e}")
+        raise
+    print(f"[Dedup] Loaded {len(known_urls)} canonical URLs from approved resources and review history")
 
+    seen_this_run = set()
+    evaluated_count = 0
     inserted = 0
-    for i, candidate in enumerate(candidates[:5], 1):
-        try:
-            print(f"[Gemini] Evaluating candidate {i}/{min(len(candidates), 5)}...")
-            evaluated = evaluate_with_gemini(candidate, domain)
+    duplicate_skips = 0
+    quality_skips = 0
+    failed_candidates = 0
+    raw_found = 0
 
-            if not evaluated.get("url_verified", False):
-                print(f"[Skip] URL not verified: {evaluated.get('title', '')[:60]}")
-                time.sleep(15)
+    for query_index, query in enumerate(queries, 1):
+        if inserted >= WEEKLY_TARGET or evaluated_count >= MAX_UNIQUE_EVALUATIONS:
+            break
+
+        print(f"[Search {query_index}/{len(queries)}] {query}")
+        try:
+            candidates = search_exa(query, num_results=RESULTS_PER_QUERY)
+        except Exception as e:
+            failed_candidates += 1
+            print(f"[Search Error] Query {query_index} failed: {e}")
+            continue
+
+        raw_found += len(candidates)
+        print(f"[Exa] Query {query_index} found {len(candidates)} results")
+
+        for candidate in candidates:
+            if inserted >= WEEKLY_TARGET or evaluated_count >= MAX_UNIQUE_EVALUATIONS:
+                break
+
+            url = (candidate.get("url") or "").strip()
+            canonical = canonicalize_url(url)
+            if not canonical:
+                duplicate_skips += 1
+                print("[Skip] Search result has no usable URL")
+                continue
+            if canonical in seen_this_run:
+                duplicate_skips += 1
+                print(f"[Skip] Duplicate result within this run: {url}")
+                continue
+            seen_this_run.add(canonical)
+
+            if canonical in known_urls:
+                duplicate_skips += 1
+                print(f"[Skip] Already in approved library or review history: {url}")
                 continue
 
-            was_inserted = insert_to_supabase(evaluated)
-            if was_inserted:
-                inserted += 1
-                print(f"[Insert] ✅ {evaluated.get('title', '')[:60]}")
+            evaluated_count += 1
+            print(f"[Gemini] Evaluating unique candidate {evaluated_count}/{MAX_UNIQUE_EVALUATIONS}...")
+            try:
+                evaluated = evaluate_with_gemini(candidate, domain)
+                evaluated_url = (evaluated.get("url") or url).strip()
+                evaluated_canonical = canonicalize_url(evaluated_url)
+                if not evaluated_canonical:
+                    quality_skips += 1
+                    print("[Skip] Gemini returned no usable URL")
+                    continue
 
-        except Exception as e:
-            print(f"[Error] Candidate {i}: {e}")
+                # Recheck Gemini's URL, since it may differ from Exa's URL.
+                if evaluated_canonical in known_urls or evaluated_canonical in seen_this_run:
+                    # If Gemini's URL is the original candidate URL, seen_this_run is expected;
+                    # only treat it as duplicate when it differs from the Exa URL.
+                    if evaluated_canonical != canonical:
+                        duplicate_skips += 1
+                        print(f"[Skip] Gemini URL already seen or present in history: {evaluated_url}")
+                        continue
 
-        # Space out Gemini calls to avoid rate limit
-        time.sleep(15)
+                passes, reason = passes_quality_threshold(evaluated)
+                if not passes:
+                    quality_skips += 1
+                    print(f"[Skip] Quality gate: {reason} — {evaluated.get('title', '')[:80]}")
+                    continue
 
-    print(f"\n[Done] Inserted {inserted} candidates into review_queue")
+                # Preserve the URL checked by Gemini as the proposed resource URL.
+                evaluated["url"] = evaluated_url
+                was_inserted = insert_to_supabase(evaluated)
+                if was_inserted:
+                    inserted += 1
+                    known_urls.add(evaluated_canonical)
+                    print(f"[Insert] {inserted}/{WEEKLY_TARGET} — {evaluated.get('title', '')[:80]} ({reason})")
+                else:
+                    duplicate_skips += 1
+            except Exception as e:
+                failed_candidates += 1
+                print(f"[Candidate Error] {url}: {e}")
+
+            # Space out Gemini calls to reduce rate-limit risk.
+            time.sleep(15)
+
+    print("\n[Weekly Discovery Summary]")
+    print(f"[Summary] Raw search results: {raw_found}")
+    print(f"[Summary] Unique candidates evaluated: {evaluated_count}")
+    print(f"[Summary] Duplicate candidates skipped: {duplicate_skips}")
+    print(f"[Summary] Quality-gate skips: {quality_skips}")
+    print(f"[Summary] Candidate/search errors: {failed_candidates}")
+    print(f"[Summary] New candidates inserted: {inserted}/{WEEKLY_TARGET}")
+    if inserted < WEEKLY_TARGET:
+        print(f"[Shortfall] Target not reached; found {inserted} qualified new candidates. No quality threshold was lowered.")
 
 
 if __name__ == "__main__":
