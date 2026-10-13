@@ -290,8 +290,8 @@ def insert_to_supabase(candidate):
     response = requests.post(
         f"{SUPABASE_URL}/rest/v1/review_queue",
         headers={
-            "apikey": SUPABASE_SERVICE_KEY,
-            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
             "Content-Type": "application/json",
             "Prefer": "return=minimal",
         },
