@@ -11,6 +11,8 @@ import os
 import json
 import requests
 import time
+import re
+from urllib.parse import urlsplit, urlunsplit
 from datetime import datetime, timezone
 
 # ── Environment variables (set in GitHub Secrets) ──
@@ -18,6 +20,8 @@ EXA_API_KEY = os.environ["EXA_API_KEY"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+# Service-role key is used only by this trusted GitHub Actions job to read private queue data.
+SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 
 # ── The 8 locked domains ──
 DOMAINS = [
@@ -160,11 +164,77 @@ No commentary. Only the JSON object."""
     raise Exception(f"Gemini failed after {max_retries} attempts")
 
 
+def canonicalize_url(url):
+    """Mirror public.canonicalize_url(text) from the deployed SQL migration."""
+    value = (url or "").strip().split("#", 1)[0]
+    match = re.match(r"^(https?)://([^/?#]+)(.*)$", value, flags=re.IGNORECASE)
+    if not match:
+        return value
+    scheme, authority, suffix = match.groups()
+    authority = authority.lower()
+    if authority.startswith("www."):
+        authority = authority[4:]
+    if "?" not in suffix:
+        suffix = re.sub(r"/+$", "", suffix)
+    return scheme.lower() + "://" + authority + suffix
+
+
+def supabase_get(table, params):
+    """Read records using the service role key in this trusted workflow."""
+    response = requests.get(
+        f"{SUPABASE_URL}/rest/v1/{table}",
+        headers={
+            "apikey": SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        },
+        params=params,
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def candidate_already_exists(url):
+    """Suppress URLs already in the approved library or anywhere in review history."""
+    canonical = canonicalize_url(url)
+    if not canonical:
+        return True
+
+    # Approved resources are protected by the database's canonical URL index too.
+    resources = supabase_get(
+        "resources",
+        {"select": "id,url,source_status", "source_status": "eq.approved", "limit": "2000"},
+    )
+    for resource in resources:
+        if canonicalize_url(resource.get("url")) == canonical:
+            print(f"[Skip] Already in approved library: {url}")
+            return True
+
+    # Any prior queue status is treated as history, including rejected candidates.
+    # This intentionally prevents automatic rediscovery; manual re-review can be added later.
+    queue_rows = supabase_get(
+        "review_queue",
+        {"select": "id,url,status", "limit": "5000"},
+    )
+    for item in queue_rows:
+        if canonicalize_url(item.get("url")) == canonical:
+            print(f"[Skip] URL already exists in review history (status={item.get('status')}): {url}")
+            return True
+    return False
+
+
 def insert_to_supabase(candidate):
-    """Insert a scored candidate into the review_queue table."""
+    """Insert only candidates absent from both the approved library and review history."""
+    url = candidate.get("url", "").strip()
+    if not url:
+        print("[Skip] Candidate has no URL")
+        return False
+    if candidate_already_exists(url):
+        return False
+
     row = {
         "title": candidate.get("title", ""),
-        "url": candidate.get("url", ""),
+        "url": url,
         "author": candidate.get("author"),
         "institution": candidate.get("institution"),
         "year": str(candidate.get("year", "")),
@@ -179,12 +249,6 @@ def insert_to_supabase(candidate):
         "ai_reasoning": candidate.get("ai_reasoning"),
         "suggested_action": "add",
         "confidence_level": "medium",
-        # TODO (v2): Implement real comparison logic against existing resources.
-        # Compare each candidate against the `resources` table and set comparison_type to
-        # one of: 'new', 'duplicate', 'supersedes', 'supplements', 'contradicts', 'gap'.
-        # Requires a two-step Gemini call: (1) fetch top-matching existing resources,
-        # (2) ask Gemini to compare and classify. Revisit when the library exceeds 200 resources.
-        # For now, default to 'new' — accurate for the majority of fresh discoveries.
         "comparison_type": "new",
         "discovery_source": "exa_api",
         "status": "pending",
@@ -193,14 +257,18 @@ def insert_to_supabase(candidate):
     response = requests.post(
         f"{SUPABASE_URL}/rest/v1/review_queue",
         headers={
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "apikey": SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
             "Content-Type": "application/json",
             "Prefer": "return=minimal",
         },
         json=row,
         timeout=30,
     )
+    # A partial unique index is the final guard against simultaneous duplicate inserts.
+    if response.status_code == 409:
+        print(f"[Skip] Database uniqueness guard blocked duplicate: {url}")
+        return False
     response.raise_for_status()
     return True
 
@@ -227,9 +295,10 @@ def main():
                 time.sleep(15)
                 continue
 
-            insert_to_supabase(evaluated)
-            inserted += 1
-            print(f"[Insert] ✅ {evaluated.get('title', '')[:60]}")
+            was_inserted = insert_to_supabase(evaluated)
+            if was_inserted:
+                inserted += 1
+                print(f"[Insert] ✅ {evaluated.get('title', '')[:60]}")
 
         except Exception as e:
             print(f"[Error] Candidate {i}: {e}")
