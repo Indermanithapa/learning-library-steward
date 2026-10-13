@@ -5,6 +5,7 @@ Runs after steward.py in the weekly sweep workflow.
 
 import os
 import requests
+from datetime import datetime, timezone
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
@@ -144,6 +145,7 @@ def main():
         },
         params={
             "status": "eq.pending",
+            "telegram_sent_at": "is.null",
             "order": "created_at.desc",
             "limit": "10",
         },
@@ -153,21 +155,36 @@ def main():
     candidates = r.json()
 
     if not candidates:
-        send_telegram_message("📭 No pending candidates this week.")
-        print("[Telegram] No pending candidates — sent empty notice.")
+        print("[Telegram] No unsent pending candidates.")
         return
 
     # Header message
     send_telegram_message(
         f"📚 *Weekly Library Review*\n\n"
-        f"{len(candidates)} candidate(s) awaiting your decision."
+        f"{len(candidates)} new candidate(s) awaiting your decision."
     )
 
     # One message per candidate
     for c in candidates:
         try:
             send_candidate(c)
-            print(f"[Telegram] Sent: {c.get('title', '')[:60]}")
+            # Mark delivered only after Telegram confirms sendMessage succeeded.
+            # A crash between Telegram success and this PATCH can still cause one resend.
+            sent_at = datetime.now(timezone.utc).isoformat()
+            patch = requests.patch(
+                f"{SUPABASE_URL}/rest/v1/review_queue",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal",
+                },
+                params={"id": f"eq.{c['id']}", "status": "eq.pending", "telegram_sent_at": "is.null"},
+                json={"telegram_sent_at": sent_at},
+                timeout=30,
+            )
+            patch.raise_for_status()
+            print(f"[Telegram] Sent and marked delivered: {c.get('title', '')[:60]}")
         except Exception as e:
             print(f"[Telegram] Error sending {c.get('id')}: {e}")
 
