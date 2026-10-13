@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 EXA_API_KEY = os.environ["EXA_API_KEY"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 # Service-role key is used only by this trusted GitHub Actions job to read private queue data.
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 
