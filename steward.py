@@ -19,9 +19,7 @@ from datetime import datetime, timezone
 EXA_API_KEY = os.environ["EXA_API_KEY"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
-# Service-role key is used only by this trusted GitHub Actions job to read private queue data.
-SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
+SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]  # Service-role key; GitHub Actions secret only.
 
 # ── The 8 locked domains ──
 DOMAINS = [
@@ -179,19 +177,54 @@ def canonicalize_url(url):
     return scheme.lower() + "://" + authority + suffix
 
 
-def supabase_get(table, params):
-    """Read records using the service role key in this trusted workflow."""
-    response = requests.get(
-        f"{SUPABASE_URL}/rest/v1/{table}",
-        headers={
-            "apikey": SUPABASE_SERVICE_KEY,
-            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-        },
-        params=params,
-        timeout=30,
-    )
-    response.raise_for_status()
-    return response.json()
+def supabase_get_all(table, params, page_size=500):
+    """Read every matching row in pages, even when the project has a row cap.
+
+    PostgREST's Content-Range header reports the total matching row count. We use
+    that total when available so a server-side page cap smaller than page_size
+    does not make the lookup stop early.
+    """
+    rows = []
+    offset = 0
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Range-Unit": "items",
+        "Prefer": "count=exact",
+    }
+
+    while True:
+        page_params = dict(params)
+        page_params["limit"] = str(page_size)
+        page_params["offset"] = str(offset)
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{table}",
+            headers=headers,
+            params=page_params,
+            timeout=30,
+        )
+        response.raise_for_status()
+        page = response.json()
+        rows.extend(page)
+
+        content_range = response.headers.get("Content-Range", "")
+        total = None
+        if "/" in content_range:
+            total_text = content_range.rsplit("/", 1)[1].strip()
+            if total_text.isdigit():
+                total = int(total_text)
+
+        if not page:
+            break
+        offset += len(page)
+        if total is not None:
+            if offset >= total:
+                break
+        elif len(page) < page_size:
+            # Fallback if the server does not provide a numeric total.
+            break
+
+    return rows
 
 
 def candidate_already_exists(url):
@@ -200,10 +233,10 @@ def candidate_already_exists(url):
     if not canonical:
         return True
 
-    # Approved resources are protected by the database's canonical URL index too.
-    resources = supabase_get(
+    # Read every approved resource; do not assume a single request returns the whole table.
+    resources = supabase_get_all(
         "resources",
-        {"select": "id,url,source_status", "source_status": "eq.approved", "limit": "2000"},
+        {"select": "id,url,source_status", "source_status": "eq.approved", "order": "id.asc"},
     )
     for resource in resources:
         if canonicalize_url(resource.get("url")) == canonical:
@@ -212,9 +245,9 @@ def candidate_already_exists(url):
 
     # Any prior queue status is treated as history, including rejected candidates.
     # This intentionally prevents automatic rediscovery; manual re-review can be added later.
-    queue_rows = supabase_get(
+    queue_rows = supabase_get_all(
         "review_queue",
-        {"select": "id,url,status", "limit": "5000"},
+        {"select": "id,url,status", "order": "id.asc"},
     )
     for item in queue_rows:
         if canonicalize_url(item.get("url")) == canonical:
