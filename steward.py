@@ -361,7 +361,7 @@ def candidate_already_exists(url):
     return False
 
 
-def insert_to_supabase(candidate):
+def insert_to_supabase(candidate, known_urls):
     """Insert only candidates absent from both the approved library and review history."""
     url = candidate.get("url", "").strip()
     if not url:
