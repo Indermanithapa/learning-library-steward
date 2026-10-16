@@ -313,6 +313,10 @@ def passes_quality_threshold(candidate):
     if not candidate.get("url_verified", False):
         return False, "URL not verified as a direct resource link"
 
+    author = (candidate.get("author") or "").strip()
+    if not author or author.lower() == "unknown":
+        return False, "missing or unknown author"
+    
     scores = []
     for field in QUALITY_SCORE_FIELDS:
         value = candidate.get(field)
@@ -363,7 +367,10 @@ def insert_to_supabase(candidate):
     if not url:
         print("[Skip] Candidate has no URL")
         return False
-    if candidate_already_exists(url):
+
+    canonical = canonicalize_url(url)
+    if canonical in known_urls:
+        print(f"[Skip] Already present in loaded history: {url}")
         return False
 
     row = {
@@ -497,7 +504,7 @@ def main():
 
                 # Preserve the URL checked by Gemini as the proposed resource URL.
                 evaluated["url"] = evaluated_url
-                was_inserted = insert_to_supabase(evaluated)
+                was_inserted = insert_to_supabase(evaluated, known_urls)
                 if was_inserted:
                     inserted += 1
                     known_urls.add(evaluated_canonical)
